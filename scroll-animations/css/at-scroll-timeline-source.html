@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<link rel="help" src="https://drafts.csswg.org/scroll-animations-1/#scroll-timeline-at-rule">
+<link rel="help" src="https://drafts.csswg.org/scroll-animations-1/#descdef-scroll-timeline-source">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/web-animations/testcommon.js"></script>
+<style>
+  :root {
+    height: 100vh;
+    overflow: scroll;
+  }
+  body {
+    height: 200vh;
+  }
+  #scroller {
+    overflow: scroll;
+    width: 100px;
+    height: 100px;
+  }
+  #contents {
+    height: 300px;
+  }
+  @keyframes expand {
+    from { width: 100px; }
+    to { width: 200px; }
+  }
+  @scroll-timeline timeline_source_none {
+    source: none;
+    time-range: 10s;
+    start: 0px;
+    end: 100px;
+  }
+  @scroll-timeline timeline_source_selector {
+    source: selector(#scroller);
+    time-range: 10s;
+    start: 0px;
+    end: 100px;
+  }
+  #container > div {
+    width: 0px;
+    animation: expand 10s linear;
+  }
+  /* Ensure stable expectations if feature is not supported */
+  @supports not (animation-timeline:foo) {
+    #container > div { animation-play-state: paused; }
+  }
+  #element_source_none { animation-timeline: timeline_source_none; }
+  #element_source_selector { animation-timeline: timeline_source_selector; }
+</style>
+<body>
+  <div id=scroller>
+    <div id=contents></div>
+  </div>
+  <div id=container>
+    <div id=element_source_none></div>
+    <div id=element_source_selector></div>
+  </div>
+  <script>
+    scroller.scrollTop = 75;
+    document.scrollingElement.scrollTop = 25;
+
+    promise_test(async (t) => {
+      await waitForNextFrame();
+      assert_equals(getComputedStyle(element_source_none).width, '125px');
+    }, 'Source none selects scrollingElement associated with document');
+
+    promise_test(async (t) => {
+      await waitForNextFrame();
+      assert_equals(getComputedStyle(element_source_selector).width, '175px');
+    }, 'Source selector(<id-selector>) selects an element');
+
+  </script>
+</body>
