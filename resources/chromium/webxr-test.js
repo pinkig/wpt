@@ -276,48 +276,9 @@ class FakeXRAnchorController {
   }
 }
 
-class FakeXRAnchorCreationEvent extends Event {
-  constructor(type, eventInitDict) {
-    super(type, eventInitDict);
-
-    this.success_ = false;
-    this.requestedAnchorOrigin_ = {};
-    this.isAttachedToEntity_ = false;
-    this.anchorController_ = new FakeXRAnchorController();
-
-    if(eventInitDict.requestedAnchorOrigin != null) {
-      this.requestedAnchorOrigin_ = eventInitDict.requestedAnchorOrigin;
-    }
-
-    if(eventInitDict.isAttachedToEntity != null) {
-      this.isAttachedToEntity_ = eventInitDict.isAttachedToEntity;
-    }
-  }
-
-  get requestedAnchorOrigin() {
-    return this.requestedAnchorOrigin_;
-  }
-
-  get isAttachedToEntity() {
-    return this.isAttachedToEntity_;
-  }
-
-  get success() {
-    return this.success_;
-  }
-
-  set success(value) {
-    this.success_ = value;
-  }
-
-  get anchorController() {
-    return this.anchorController_;
-  }
-}
-
 // Implements XRFrameDataProvider and XRPresentationProvider. Maintains a mock
 // for XRPresentationProvider. Implements FakeXRDevice test API.
-class MockRuntime extends EventTarget {
+class MockRuntime {
   // Mapping from string feature names to the corresponding mojo types.
   // This is exposed as a member for extensibility.
   static featureToMojoMap = {
@@ -339,8 +300,6 @@ class MockRuntime extends EventTarget {
   };
 
   constructor(fakeDeviceInit, service) {
-    super();
-
     this.sessionClient_ = new device.mojom.XRSessionClientPtr();
     this.presentation_provider_ = new MockXRPresentationProvider();
 
@@ -368,6 +327,8 @@ class MockRuntime extends EventTarget {
     this.anchor_controllers_ = new Map();
     // ID of the next anchor to be assigned.
     this.next_anchor_id_ = 1;
+    // Anchor creation callback (initially null, can be set by tests).
+    this.anchor_creation_callback_ = null;
 
     let supportedModes = [];
     if (fakeDeviceInit.supportedModes) {
@@ -568,6 +529,10 @@ class MockRuntime extends EventTarget {
     return source;
   }
 
+  setAnchorCreationCallback(callback) {
+    this.anchor_creation_callback_ = callback;
+  }
+
   // Helper methods
   getNonImmersiveDisplayInfo() {
     const displayInfo = this.getImmersiveDisplayInfo();
@@ -706,50 +671,58 @@ class MockRuntime extends EventTarget {
 
   // XRFrameDataProvider implementation.
   getFrameData(options) {
-    const mojo_space_reset = this.send_mojo_space_reset_;
-    this.send_mojo_space_reset_ = false;
+    return new Promise((resolve) => {
 
-    const stage_parameters_updated = this.stageParametersUpdated_;
-    this.stageParametersUpdated_ = false;
-    if (this.pose_) {
-      this.pose_.poseIndex++;
-    }
+      // Set 5ms timeout - this is roughly to emulate the short gap in processing
+      // getFrameData() request on the device (further frame processing continues
+      // in a scheduled task).
+      // In addition, it also gives a chance for anchor WPTs to have their anchor
+      // creation request results picked up by the fake runtime implementation.
+      setTimeout(() => {
+        const mojo_space_reset = this.send_mojo_space_reset_;
+        this.send_mojo_space_reset_ = false;
 
-    // Setting the input_state to null tests a slightly different path than
-    // the browser tests where if the last input source is removed, the device
-    // code always sends up an empty array, but it's also valid mojom to send
-    // up a null array.
-    let input_state = null;
-    if (this.input_sources_.size > 0) {
-      input_state = [];
-      for (const input_source of this.input_sources_.values()) {
-        input_state.push(input_source.getInputSourceState());
-      }
-    }
+        const stage_parameters_updated = this.stageParametersUpdated_;
+        this.stageParametersUpdated_ = false;
+        if (this.pose_) {
+          this.pose_.poseIndex++;
+        }
 
-    const frameData = {
-      pose: this.pose_,
-      mojoSpaceReset: mojo_space_reset,
-      inputState: input_state,
-      timeDelta: {
-        // window.performance.now() is in milliseconds, so convert to microseconds.
-        microseconds: window.performance.now() * 1000,
-      },
-      frameId: this.next_frame_id_++,
-      bufferHolder: null,
-      bufferSize: {},
-      stageParameters: this.stageParameters_,
-      stageParametersUpdated: stage_parameters_updated,
-    };
+        // Setting the input_state to null tests a slightly different path than
+        // the browser tests where if the last input source is removed, the device
+        // code always sends up an empty array, but it's also valid mojom to send
+        // up a null array.
+        let input_state = null;
+        if (this.input_sources_.size > 0) {
+          input_state = [];
+          for (const input_source of this.input_sources_.values()) {
+            input_state.push(input_source.getInputSourceState());
+          }
+        }
 
-    this._calculateHitTestResults(frameData);
+        const frameData = {
+          pose: this.pose_,
+          mojoSpaceReset: mojo_space_reset,
+          inputState: input_state,
+          timeDelta: {
+            // window.performance.now() is in milliseconds, so convert to microseconds.
+            microseconds: window.performance.now() * 1000,
+          },
+          frameId: this.next_frame_id_++,
+          bufferHolder: null,
+          bufferSize: {},
+          stageParameters: this.stageParameters_,
+          stageParametersUpdated: stage_parameters_updated,
+        };
 
-    this._calculateAnchorInformation(frameData);
+        this._calculateHitTestResults(frameData);
 
-    this._injectAdditionalFrameData(options, frameData);
+        this._calculateAnchorInformation(frameData);
 
-    return Promise.resolve({
-      frameData: frameData,
+        this._injectAdditionalFrameData(options, frameData);
+
+        resolve({frameData});
+      }, 5);
     });
   }
 
@@ -818,6 +791,15 @@ class MockRuntime extends EventTarget {
 
   createAnchor(nativeOriginInformation, nativeOriginFromAnchor) {
     return new Promise((resolve) => {
+      if(this.anchor_creation_callback_ == null) {
+        resolve({
+          result : device.mojom.CreateAnchorResult.FAILURE,
+          anchorId : 0
+        });
+
+        return;
+      }
+
       const mojoFromNativeOrigin = this._getMojoFromNativeOrigin(nativeOriginInformation);
       if(mojoFromNativeOrigin == null) {
         resolve({
@@ -830,36 +812,45 @@ class MockRuntime extends EventTarget {
 
       const mojoFromAnchor = XRMathHelper.mul4x4(mojoFromNativeOrigin, nativeOriginFromAnchor);
 
-      const createAnchorEvent = new FakeXRAnchorCreationEvent("anchorcreate", {
+      const anchorCreationParameters = {
         requestedAnchorOrigin: mojoFromAnchor,
         isAttachedToEntity: false,
-      });
+      };
 
-      this.dispatchEvent(createAnchorEvent);
+      const anchorController = new FakeXRAnchorController();
 
-      if(createAnchorEvent.success) {
-        let anchor_controller = createAnchorEvent.anchorController;
-        const anchor_id = this.next_anchor_id_;
-        this.next_anchor_id_++;
+      this.anchor_creation_callback_(anchorCreationParameters, anchorController)
+            .then((result) => {
+              if(result) {
+                // If the test allowed the anchor creation,
+                // store the anchor controller & return success.
 
-        // If the test allowed the anchor creation,
-        // store the anchor controller & return success.
-        this.anchor_controllers_.set(anchor_id, anchor_controller);
-        anchor_controller.device = this;
-        anchor_controller.id = anchor_id;
+                const anchor_id = this.next_anchor_id_;
+                this.next_anchor_id_++;
 
-        resolve({
-          result : device.mojom.CreateAnchorResult.SUCCESS,
-          anchorId : anchor_id
-        });
+                this.anchor_controllers_.set(anchor_id, anchorController);
+                anchorController.device = this;
+                anchorController.id = anchor_id;
 
-        return;
-      }
-
-      resolve({
-        result : device.mojom.CreateAnchorResult.FAILURE,
-        anchorId : 0
-      });
+                resolve({
+                  result : device.mojom.CreateAnchorResult.SUCCESS,
+                  anchorId : anchor_id
+                });
+              } else {
+                // The test has rejected anchor creation.
+                resolve({
+                  result : device.mojom.CreateAnchorResult.FAILURE,
+                  anchorId : 0
+                });
+              }
+            })
+            .catch(() => {
+              // The test threw an error, treat anchor creation as failed.
+              resolve({
+                result : device.mojom.CreateAnchorResult.FAILURE,
+                anchorId : 0
+              });
+            });
     });
   }
 
